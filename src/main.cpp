@@ -7,9 +7,10 @@
 #include "Config.h"
 #include "PID_v1.h"
 #include "analogWrite.h"
+#include "CircularBuffer.h"
 
 #define MESSAGE_MAX_LEN 4096 // size of message buffers
-
+#define LOG_LEN 256 // max length of internal log
 #define WIFI_TIMEOUT_MS 10000 // timeout for connecting to wifi network before re-trying
 
 /* *******************************************************************************
@@ -50,6 +51,9 @@ static double input, output;             // storage for measured and calculated 
 
 PID pid(&input, &output, &setpoint, kP, kI, kD, DIRECT);
 
+// logging
+static CircularBuffer<float, LOG_LEN> tempBuffer; 
+
 // thread safety
 SemaphoreHandle_t pidUpdateMutex;
 
@@ -89,14 +93,30 @@ static bool initWifi(int timeoutInMs)
 static double readTemperature()
 {
   // NOTE that these values are simply the scaled values (due to 4x resolution ADC) from PID_Basic_Thermistor_Calibration.ino
-  double reading;
+  double reading, result;
 
-  reading = 4096 - 2 * (double)analogRead(PIN_THERMISTOR_IN);
+  xSemaphoreTake(pidUpdateMutex, portMAX_DELAY);
+
+  // stop PWM output for reading
+  analogWrite(PIN_PWM_OUT, 0);
+
+  reading = 4096 - (double)analogRead(PIN_THERMISTOR_IN);
+
+  /*
   reading = reading + 228; // heuristic offset so that input always > 0
   reading = reading * 900;
   reading = reading / 4096;
+  */
 
-  return reading;
+  // curve fit 
+  result = 4.51527 * exp(0.000735 * reading);
+
+  // restart PWM output after reading
+  analogWrite(PIN_PWM_OUT, 255);
+
+  xSemaphoreGive(pidUpdateMutex);
+
+  return result;
 }
 
 /* *******************************************************************************
@@ -200,7 +220,10 @@ static int deviceMethodCallback(const char *methodName, const unsigned char *pay
     // take mutex to prevent pid compute operations during value updating
     xSemaphoreTake(pidUpdateMutex, portMAX_DELAY);
 
-    pid.SetTunings(newP.as<double>(), newI.as<double>(), newD.as<double>()); 
+    kP = newP.as<double>();
+    kI = newI.as<double>();
+    kD = newD.as<double>();
+    pid.SetTunings(kP, kI, kD); 
 
     xSemaphoreGive(pidUpdateMutex);
 
@@ -221,7 +244,14 @@ static int deviceMethodCallback(const char *methodName, const unsigned char *pay
   }
   else if (strcmp(methodName, "getHistoricalData") == 0)
   {
-    // TODO
+    int i = 0;
+    JsonArray data = responsePayload.createNestedArray("data");
+    
+    for (i = 0; i < tempBuffer.size(); i++) {
+      data.add(tempBuffer[i]);
+    }
+
+    Serial.println(F("INFO: Responding with historical data"));
   }
   else 
   {
@@ -279,10 +309,13 @@ static void commsTask(void *pvParameters)
       if (messageSending && (int)(millis() - lastMessage) >= interval)
       {
         char messagePayload[MESSAGE_MAX_LEN];
+        float temp = readTemperature();
         StaticJsonDocument<MESSAGE_MAX_LEN> doc;
 
+        tempBuffer.push(temp);
+
         doc["messageId"] = messageCount;
-        doc["temperature"] = readTemperature();
+        doc["temperature"] = temp;
         doc["dutyCycle"] = output;
 
         serializeJson(doc, messagePayload);
@@ -293,6 +326,7 @@ static void commsTask(void *pvParameters)
         EVENT_INSTANCE *message = Esp32MQTTClient_Event_Generate(messagePayload, MESSAGE);
         Esp32MQTTClient_SendEventInstance(message);
 
+        messageCount++;
         lastMessage = millis();
       }
 
