@@ -2,6 +2,8 @@
 
 Modified version of example sketch demonstrating ability to send and receive coordinate data from Azure IoT hub. From https://docs.microsoft.com/en-us/samples/azure-samples/esp32-iot-devkit-get-started/sample/
 
+Designed for the ENEE101 Covid19 Response Project. For more information, see University of Maryland website: https://ece.umd.edu/news/story/professor-romel-gomez-and-students-participate-in-iotswc20-digital-summit
+
 ## Setup
 
 ### In Platformio
